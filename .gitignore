@@ -1,0 +1,37 @@
+# CMake
+CMakeCache.txt
+CMakeFiles
+Makefile
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+cmake/leveldbConfig.cmake
+cmake/leveldbConfigVersion.cmake
+include/port/
+*.cmake
+!leveldbConfig.cmake.in
+!/cmake/
+
+# Binaries
+/build/
+*.a
+*.o
+*.dylib
+*.so
+/leveldbutil
+/leveldb_tests
+/c_test
+/db_bench
+/db_bench_sqlite3
+/env_posix_test
+/issue*_test
+*_test
+*_bench
+
+# Editor
+.vscode/
+.DS_Store
+
+# Third-party dependencies (downloaded automatically)
+third_party/googletest/
+third_party/benchmark/
