@@ -13,6 +13,7 @@ include/port/
 !/cmake/
 
 # Binaries
+.cache
 /build/
 *.a
 *.o
