@@ -300,18 +300,7 @@ if(LEVELDB_BUILD_TESTS)
   set(build_gmock ON)
 
   # This project is tested using GoogleTest.
-  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/googletest/CMakeLists.txt")
-    add_subdirectory("third_party/googletest")
-  else()
-    include(FetchContent)
-    FetchContent_Declare(
-      googletest
-      GIT_REPOSITORY https://github.com/google/googletest.git
-      GIT_TAG        release-1.11.0
-    )
-    FetchContent_MakeAvailable(googletest)
-  endif()
-
+  add_subdirectory("third_party/googletest")
   # GoogleTest triggers a missing field initializers warning.
   if(LEVELDB_HAVE_NO_MISSING_FIELD_INITIALIZERS)
     set_property(TARGET gtest
@@ -418,17 +407,7 @@ if(LEVELDB_BUILD_BENCHMARKS)
   # This project uses Google benchmark for benchmarking.
   set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
   set(BENCHMARK_ENABLE_EXCEPTIONS OFF CACHE BOOL "" FORCE)
-  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/benchmark/CMakeLists.txt")
-    add_subdirectory("third_party/benchmark")
-  else()
-    include(FetchContent)
-    FetchContent_Declare(
-      benchmark
-      GIT_REPOSITORY https://github.com/google/benchmark.git
-      GIT_TAG        v1.6.0
-    )
-    FetchContent_MakeAvailable(benchmark)
-  endif()
+  add_subdirectory("third_party/benchmark")
 
   function(leveldb_benchmark bench_file)
     get_filename_component(bench_target_name "${bench_file}" NAME_WE)
