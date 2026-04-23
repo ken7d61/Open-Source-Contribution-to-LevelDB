@@ -1576,4 +1576,77 @@ Status DestroyDB(const std::string& dbname, const Options& options) {
   return result;
 }
 
+Status DBImpl::Scan(const Slice& start_key, const Slice& end_key,
+                    std::vector<std::pair<std::string, std::string>>* result) {
+  result->clear();
+  
+  const Comparator* cmp = options_.comparator;
+  Iterator* it = NewIterator(ReadOptions());
+  
+  for (it->Seek(start_key); it->Valid(); it->Next()) {
+    if (cmp->Compare(it->key(), end_key) >= 0) break;
+    
+    result->emplace_back(it->key().ToString(), it->value().ToString());
+  }
+  
+  Status s = it->status();
+  delete it;
+  return s;
+}
+
+
+Status DBImpl::DeleteRange(const Slice& start_key, const Slice& end_key) {
+  const Comparator* cmp = options_.comparator;
+  Iterator* it = NewIterator(ReadOptions());
+  WriteBatch batch;
+  
+  for (it->Seek(start_key); it->Valid(); it->Next()) {
+    if (cmp->Compare(it->key(), end_key) >= 0) break;
+    batch.Delete(it->key());
+  }
+  
+  Status s = it->status();
+  delete it;
+  
+  if (!s.ok()) return s;
+  
+  
+  if (batch.ApproximateSize() <= 12) return Status::OK();  // 12 = kHeader size
+  
+  return Write(WriteOptions(), &batch);
+}
+
+
+Status DBImpl::ForceFullCompaction() {
+  const uint64_t kBaseLimit = 10 * 1024 * 1024;  
+  
+  for (int lvl = 0; lvl < config::kNumLevels - 1; lvl++) {
+    while (true) {
+      Version* curr = versions_->current();
+      const auto& level_files = curr->files_[lvl];
+      
+    
+      if (level_files.empty()) break;
+      
+      double score;
+      if (lvl == 0) {
+        score = level_files.size() / 4.0;
+      } else {
+        uint64_t total_bytes = 0;
+        for (const auto& f : level_files) {
+          total_bytes += f->file_size;
+        }
+        score = static_cast<double>(total_bytes) / (kBaseLimit << (lvl - 1));
+      }
+      
+      if (score < 1.0) break;
+      
+      Status s = CompactRange(lvl, nullptr, nullptr);
+      if (!s.ok()) return s;
+    }
+  }
+  
+  return Status::OK();
+}
+
 }  // namespace leveldb
