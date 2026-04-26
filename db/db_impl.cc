@@ -1618,7 +1618,8 @@ Status DBImpl::DeleteRange(const WriteOptions& options, const Slice& start_key,
 
 
 Status DBImpl::ForceFullCompaction() {
-  TEST_CompactMemTable();
+  Status s = TEST_CompactMemTable();
+  if (!s.ok()) return s;
 
   int64_t baseline_bytes_read = 0;
   int64_t baseline_bytes_written = 0;
@@ -1646,6 +1647,11 @@ Status DBImpl::ForceFullCompaction() {
 
     TEST_CompactRange(lvl, nullptr, nullptr);
     num_compactions++;
+  }
+
+  {
+    MutexLock l(&mutex_);
+    if (!bg_error_.ok()) return bg_error_;
   }
 
   int64_t final_bytes_read = 0;
