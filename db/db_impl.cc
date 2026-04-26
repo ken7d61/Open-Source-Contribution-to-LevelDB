@@ -1618,50 +1618,39 @@ Status DBImpl::DeleteRange(const WriteOptions& options, const Slice& start_key,
 
 
 Status DBImpl::ForceFullCompaction() {
-  const uint64_t kBaseLimit = 10 * 1024 * 1024;
+  TEST_CompactMemTable();
 
   int64_t baseline_bytes_read = 0;
   int64_t baseline_bytes_written = 0;
   int64_t baseline_micros = 0;
+  int64_t total_input_files = 0;
   {
     MutexLock l(&mutex_);
     for (int level = 0; level < config::kNumLevels; level++) {
       baseline_bytes_read += stats_[level].bytes_read;
       baseline_bytes_written += stats_[level].bytes_written;
       baseline_micros += stats_[level].micros;
+      total_input_files += versions_->NumLevelFiles(level);
     }
   }
-  int64_t num_compactions = 0;
+
+  int64_t num_compactions = 1;  
 
   for (int lvl = 0; lvl < config::kNumLevels - 1; lvl++) {
-    while (true) {
-      int num_files;
-      int64_t total_bytes;
-      {
-        MutexLock l(&mutex_);
-        num_files = versions_->NumLevelFiles(lvl);
-        total_bytes = versions_->NumLevelBytes(lvl);
-      }
-      if (num_files == 0) break;
-
-      double score;
-      if (lvl == 0) {
-        score = num_files / 4.0;
-      } else {
-        score = static_cast<double>(total_bytes) / (kBaseLimit << (lvl - 1));
-      }
-
-      if (score < 1.0) break;
-
-      TEST_CompactRange(lvl, nullptr, nullptr);
-      num_compactions++;
+    int num_files;
+    {
+      MutexLock l(&mutex_);
+      num_files = versions_->NumLevelFiles(lvl);
     }
+    if (num_files == 0) continue;
+
+    TEST_CompactRange(lvl, nullptr, nullptr);
+    num_compactions++;
   }
 
   int64_t final_bytes_read = 0;
   int64_t final_bytes_written = 0;
   int64_t final_micros = 0;
-  int64_t total_input_files = 0;
   int64_t total_output_files = 0;
   {
     MutexLock l(&mutex_);
@@ -1671,26 +1660,18 @@ Status DBImpl::ForceFullCompaction() {
       final_micros += stats_[level].micros;
       total_output_files += versions_->NumLevelFiles(level);
     }
-    total_input_files = total_output_files;
   }
 
-  std::fprintf(stdout,
-               "===== ForceFullCompaction Statistics =====\n"
-               "Compactions executed : %lld\n"
-               "Input files          : %lld\n"
-               "Output files         : %lld\n"
-               "Bytes read           : %lld\n"
-               "Bytes written        : %lld\n"
-               "Time (micros)        : %lld\n"
-               "==========================================\n",
-               static_cast<long long>(num_compactions),
-               static_cast<long long>(total_input_files),
-               static_cast<long long>(total_output_files),
-               static_cast<long long>(final_bytes_read - baseline_bytes_read),
-               static_cast<long long>(final_bytes_written -
-                                      baseline_bytes_written),
-               static_cast<long long>(final_micros - baseline_micros));
-  std::fflush(stdout);
+  FILE* f = std::fopen("compaction_stats.txt", "a");
+  if (f != nullptr) {
+    std::fprintf(f, "%lld; %lld; %lld; %lld; %lld\n",
+                 static_cast<long long>(num_compactions),
+                 static_cast<long long>(total_input_files),
+                 static_cast<long long>(total_output_files),
+                 static_cast<long long>(final_bytes_read - baseline_bytes_read),
+                 static_cast<long long>(final_bytes_written - baseline_bytes_written));
+    std::fclose(f);
+  }
 
   return Status::OK();
 }

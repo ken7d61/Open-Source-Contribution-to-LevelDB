@@ -53,10 +53,10 @@ class DBImpl : public DB {
 
   Status Scan(const ReadOptions& options, const Slice& start_key,
               const Slice& end_key,
-              std::vector<std::pair<std::string, std::string>>* result);
+              std::vector<std::pair<std::string, std::string>>* result) override;
   Status DeleteRange(const WriteOptions& options, const Slice& start_key,
-                     const Slice& end_key);
-  Status ForceFullCompaction();
+                     const Slice& end_key) override;
+  Status ForceFullCompaction() override;
 
   // Extra methods (for testing) that are not in the public DB interface
 
