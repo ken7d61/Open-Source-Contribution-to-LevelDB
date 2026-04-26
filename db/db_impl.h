@@ -51,9 +51,11 @@ class DBImpl : public DB {
   void GetApproximateSizes(const Range* range, int n, uint64_t* sizes) override;
   void CompactRange(const Slice* begin, const Slice* end) override;
 
-  Status Scan(const Slice& start_key, const Slice& end_key,
+  Status Scan(const ReadOptions& options, const Slice& start_key,
+              const Slice& end_key,
               std::vector<std::pair<std::string, std::string>>* result);
-  Status DeleteRange(const Slice& start_key, const Slice& end_key);
+  Status DeleteRange(const WriteOptions& options, const Slice& start_key,
+                     const Slice& end_key);
   Status ForceFullCompaction();
 
   // Extra methods (for testing) that are not in the public DB interface

@@ -1576,76 +1576,122 @@ Status DestroyDB(const std::string& dbname, const Options& options) {
   return result;
 }
 
-Status DBImpl::Scan(const Slice& start_key, const Slice& end_key,
+Status DBImpl::Scan(const ReadOptions& options, const Slice& start_key,
+                    const Slice& end_key,
                     std::vector<std::pair<std::string, std::string>>* result) {
   result->clear();
-  
-  const Comparator* cmp = options_.comparator;
-  Iterator* it = NewIterator(ReadOptions());
-  
+
+  const Comparator* cmp = user_comparator();
+  Iterator* it = NewIterator(options);
+
   for (it->Seek(start_key); it->Valid(); it->Next()) {
     if (cmp->Compare(it->key(), end_key) >= 0) break;
-    
     result->emplace_back(it->key().ToString(), it->value().ToString());
   }
-  
+
   Status s = it->status();
   delete it;
   return s;
 }
 
 
-Status DBImpl::DeleteRange(const Slice& start_key, const Slice& end_key) {
-  const Comparator* cmp = options_.comparator;
+Status DBImpl::DeleteRange(const WriteOptions& options, const Slice& start_key,
+                           const Slice& end_key) {
+  const Comparator* cmp = user_comparator();
   Iterator* it = NewIterator(ReadOptions());
   WriteBatch batch;
-  
+
   for (it->Seek(start_key); it->Valid(); it->Next()) {
     if (cmp->Compare(it->key(), end_key) >= 0) break;
     batch.Delete(it->key());
   }
-  
+
   Status s = it->status();
   delete it;
-  
+
   if (!s.ok()) return s;
-  
-  
+
   if (batch.ApproximateSize() <= 12) return Status::OK();  // 12 = kHeader size
-  
-  return Write(WriteOptions(), &batch);
+
+  return Write(options, &batch);
 }
 
 
 Status DBImpl::ForceFullCompaction() {
-  const uint64_t kBaseLimit = 10 * 1024 * 1024;  
-  
-  for (int lvl = 0; lvl < config::kNumLevels - 1; lvl++) {
-    while (true) {
-      Version* curr = versions_->current();
-      const auto& level_files = curr->files_[lvl];
-      
-    
-      if (level_files.empty()) break;
-      
-      double score;
-      if (lvl == 0) {
-        score = level_files.size() / 4.0;
-      } else {
-        uint64_t total_bytes = 0;
-        for (const auto& f : level_files) {
-          total_bytes += f->file_size;
-        }
-        score = static_cast<double>(total_bytes) / (kBaseLimit << (lvl - 1));
-      }
-      
-      if (score < 1.0) break;
-      
-      Status s = CompactRange(lvl, nullptr, nullptr);
-      if (!s.ok()) return s;
+  const uint64_t kBaseLimit = 10 * 1024 * 1024;
+
+  int64_t baseline_bytes_read = 0;
+  int64_t baseline_bytes_written = 0;
+  int64_t baseline_micros = 0;
+  {
+    MutexLock l(&mutex_);
+    for (int level = 0; level < config::kNumLevels; level++) {
+      baseline_bytes_read += stats_[level].bytes_read;
+      baseline_bytes_written += stats_[level].bytes_written;
+      baseline_micros += stats_[level].micros;
     }
   }
-  
+  int64_t num_compactions = 0;
+
+  for (int lvl = 0; lvl < config::kNumLevels - 1; lvl++) {
+    while (true) {
+      int num_files;
+      int64_t total_bytes;
+      {
+        MutexLock l(&mutex_);
+        num_files = versions_->NumLevelFiles(lvl);
+        total_bytes = versions_->NumLevelBytes(lvl);
+      }
+      if (num_files == 0) break;
+
+      double score;
+      if (lvl == 0) {
+        score = num_files / 4.0;
+      } else {
+        score = static_cast<double>(total_bytes) / (kBaseLimit << (lvl - 1));
+      }
+
+      if (score < 1.0) break;
+
+      TEST_CompactRange(lvl, nullptr, nullptr);
+      num_compactions++;
+    }
+  }
+
+  int64_t final_bytes_read = 0;
+  int64_t final_bytes_written = 0;
+  int64_t final_micros = 0;
+  int64_t total_input_files = 0;
+  int64_t total_output_files = 0;
+  {
+    MutexLock l(&mutex_);
+    for (int level = 0; level < config::kNumLevels; level++) {
+      final_bytes_read += stats_[level].bytes_read;
+      final_bytes_written += stats_[level].bytes_written;
+      final_micros += stats_[level].micros;
+      total_output_files += versions_->NumLevelFiles(level);
+    }
+    total_input_files = total_output_files;
+  }
+
+  std::fprintf(stdout,
+               "===== ForceFullCompaction Statistics =====\n"
+               "Compactions executed : %lld\n"
+               "Input files          : %lld\n"
+               "Output files         : %lld\n"
+               "Bytes read           : %lld\n"
+               "Bytes written        : %lld\n"
+               "Time (micros)        : %lld\n"
+               "==========================================\n",
+               static_cast<long long>(num_compactions),
+               static_cast<long long>(total_input_files),
+               static_cast<long long>(total_output_files),
+               static_cast<long long>(final_bytes_read - baseline_bytes_read),
+               static_cast<long long>(final_bytes_written -
+                                      baseline_bytes_written),
+               static_cast<long long>(final_micros - baseline_micros));
+  std::fflush(stdout);
+
   return Status::OK();
 }
 
