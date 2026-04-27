@@ -146,9 +146,9 @@ DBImpl::DBImpl(const Options& raw_options, const std::string& dbname)
       tmp_batch_(new WriteBatch),
       background_compaction_scheduled_(false),
       manual_compaction_(nullptr),
+      full_compaction_in_progress_(false),
       versions_(new VersionSet(dbname_, &options_, table_cache_,
-                               &internal_comparator_)) {}
-
+                              &internal_comparator_)) {}
 DBImpl::~DBImpl() {
   // Wait for background work to finish.
   mutex_.Lock();
@@ -1084,6 +1084,9 @@ Iterator* DBImpl::NewInternalIterator(const ReadOptions& options,
                                       SequenceNumber* latest_snapshot,
                                       uint32_t* seed) {
   mutex_.Lock();
+  while (full_compaction_in_progress_) {
+    background_work_finished_signal_.Wait();
+  }
   *latest_snapshot = versions_->LastSequence();
 
   // Collect together all needed child iterators
@@ -1122,6 +1125,9 @@ Status DBImpl::Get(const ReadOptions& options, const Slice& key,
                    std::string* value) {
   Status s;
   MutexLock l(&mutex_);
+  while (full_compaction_in_progress_) {
+    background_work_finished_signal_.Wait();
+  }
   SequenceNumber snapshot;
   if (options.snapshot != nullptr) {
     snapshot =
@@ -1210,6 +1216,9 @@ Status DBImpl::Write(const WriteOptions& options, WriteBatch* updates) {
   w.done = false;
 
   MutexLock l(&mutex_);
+  while (full_compaction_in_progress_) {
+    background_work_finished_signal_.Wait();
+  }
   writers_.push_back(&w);
   while (!w.done && &w != writers_.front()) {
     w.cv.Wait();
@@ -1618,8 +1627,18 @@ Status DBImpl::DeleteRange(const WriteOptions& options, const Slice& start_key,
 
 
 Status DBImpl::ForceFullCompaction() {
+  // Flush the memtable FIRST, before setting the blocking flag.
+  // TEST_CompactMemTable calls Write(nullptr), which would deadlock
+  // if full_compaction_in_progress_ is already true.
   Status s = TEST_CompactMemTable();
-  if (!s.ok()) return s;
+  if (!s.ok()) {
+    return s;
+  }
+
+  {
+    MutexLock l(&mutex_);
+    full_compaction_in_progress_ = true;
+  }
 
   int64_t baseline_bytes_read = 0;
   int64_t baseline_bytes_written = 0;
@@ -1651,6 +1670,8 @@ Status DBImpl::ForceFullCompaction() {
 
   {
     MutexLock l(&mutex_);
+    full_compaction_in_progress_ = false;
+    background_work_finished_signal_.SignalAll();
     if (!bg_error_.ok()) return bg_error_;
   }
 

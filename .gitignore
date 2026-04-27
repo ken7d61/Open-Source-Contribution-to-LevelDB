@@ -1,6 +1,7 @@
 # CMake
 CMakeCache.txt
 CMakeFiles
+build_linux/
 Makefile
 cmake_install.cmake
 install_manifest.txt
@@ -33,6 +34,24 @@ include/port/
 # Editor
 .vscode/
 .DS_Store
+.claude/
+
+# LaTeX build artifacts
+*.aux
+*.log
+*.out
+*.toc
+
+# Runtime / test databases
+testdb_eval/
+testdb/
+
+# Compiled binaries
+*.exe
+
+# Misc
+stats.awk
+compaction_stats.txt
 
 # Third-party dependencies (downloaded automatically)
 third_party/googletest/

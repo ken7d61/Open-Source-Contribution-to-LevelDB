@@ -206,6 +206,8 @@ class DBImpl : public DB {
 
   ManualCompaction* manual_compaction_ GUARDED_BY(mutex_);
 
+  bool full_compaction_in_progress_ GUARDED_BY(mutex_);
+
   VersionSet* const versions_ GUARDED_BY(mutex_);
 
   // Have we encountered a background error in paranoid mode?
