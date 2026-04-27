@@ -8,7 +8,16 @@
 \usepackage{xcolor}
 \usepackage{microtype}
 \usepackage{parskip}
+
+% Prevent orphan/widow lines
+\widowpenalty=10000
+\clubpenalty=10000
 \usepackage{listings}
+\usepackage{etoolbox}
+
+% Prevent code listings from breaking across pages
+\BeforeBeginEnvironment{lstlisting}{\par\vspace{\medskipamount}\begin{minipage}{\linewidth}}
+\AfterEndEnvironment{lstlisting}{\end{minipage}\par\vspace{\medskipamount}}
 \usepackage{titlesec}
 \usepackage[most]{tcolorbox}
 \usepackage{tikz}
@@ -162,7 +171,6 @@ benchmark tests and the analysis of \texttt{compaction\_stats.txt}.
 \vspace{1em}
 {\color{primary}\hrule height 0.3pt}
 \tableofcontents
-{\color{primary}\hrule height 0.3pt}
 \newpage
 
 % =============================================================
@@ -195,7 +203,7 @@ The file and level layout is managed by \sym{VersionSet}
 snapshot of the current file-set, updated via \sym{VersionEdit} records
 written to a MANIFEST file.
 
-\begin{figure}[h!]
+\begin{figure}[htbp]
 \centering
 \begin{tikzpicture}[
     node distance=4mm and 6mm,
@@ -270,6 +278,61 @@ Status DB::Delete(const WriteOptions& opt, const Slice& key) {
           are signalled.
 \end{enumerate}
 
+The core of \fname{Write} --- WAL append, optional sync, and MemTable insertion:
+
+\begin{lstlisting}
+// db/db_impl.cc : 1231-1266  (inside DBImpl::Write)
+Status status = MakeRoomForWrite(updates == nullptr);
+uint64_t last_sequence = versions_->LastSequence();
+Writer* last_writer = &w;
+if (status.ok() && updates != nullptr) {
+  WriteBatch* write_batch = BuildBatchGroup(&last_writer);
+  WriteBatchInternal::SetSequence(write_batch, last_sequence + 1);
+  last_sequence += WriteBatchInternal::Count(write_batch);
+  {
+    mutex_.Unlock();
+    status = log_->AddRecord(WriteBatchInternal::Contents(write_batch));
+    if (status.ok() && options.sync) {
+      status = logfile_->Sync();
+    }
+    if (status.ok()) {
+      status = WriteBatchInternal::InsertInto(write_batch, mem_);
+    }
+    mutex_.Lock();
+  }
+  versions_->SetLastSequence(last_sequence);
+}
+\end{lstlisting}
+
+\fname{MakeRoomForWrite} (\codref{db/db\_impl.cc}{1340--1414}) is the
+back-pressure loop that keeps the write path sustainable:
+
+\begin{lstlisting}
+// db/db_impl.cc : 1340-1413  (MakeRoomForWrite, simplified)
+Status DBImpl::MakeRoomForWrite(bool force) {
+  while (true) {
+    if (!bg_error_.ok()) {
+      s = bg_error_; break;
+    } else if (allow_delay &&
+        versions_->NumLevelFiles(0) >= config::kL0_SlowdownWritesTrigger) {
+      env_->SleepForMicroseconds(1000);   // 1 ms throttle
+      allow_delay = false;
+    } else if (!force &&
+        mem_->ApproximateMemoryUsage() <= options_.write_buffer_size) {
+      break;                              // room available
+    } else if (imm_ != nullptr) {
+      background_work_finished_signal_.Wait(); // wait for flush
+    } else {
+      // rotate: mem_ -> imm_, create new mem_ + WAL
+      imm_ = mem_;
+      mem_ = new MemTable(internal_comparator_);
+      MaybeScheduleCompaction();
+    }
+  }
+  return s;
+}
+\end{lstlisting}
+
 \begin{designnote}[Durability]
 A write is durable once \sym{log\_->AddRecord} returns (and
 \sym{logfile\_->Sync()} if requested). The MemTable is flushed to an SSTable
@@ -279,7 +342,7 @@ anything in the WAL is replayed on the next \sym{DB::Open}.
 
 \subsection{Read path}
 
-\textbf{Point lookup.} \sym{DBImpl::Get} (\codref{db/db\_impl.cc}{1121--1172})
+\textbf{Point lookup.} \sym{DBImpl::Get} (\codref{db/db\_impl.cc}{1124--1172})
 fixes a snapshot sequence number and searches in order:
 \begin{enumerate}[leftmargin=1.6em,itemsep=1pt]
     \item \sym{mem\_->Get} --- active MemTable.
@@ -289,6 +352,23 @@ fixes a snapshot sequence number and searches in order:
 \end{enumerate}
 The first match wins. A \sym{kTypeDeletion} entry returns
 \sym{Status::IsNotFound()}.
+
+\begin{lstlisting}
+// db/db_impl.cc : 1149-1163  (inside DBImpl::Get, lock released)
+{
+  mutex_.Unlock();
+  LookupKey lkey(key, snapshot);
+  if (mem->Get(lkey, value, &s)) {
+    // Done
+  } else if (imm != nullptr && imm->Get(lkey, value, &s)) {
+    // Done
+  } else {
+    s = current->Get(options, lkey, value, &stats);
+    have_stat_update = true;
+  }
+  mutex_.Lock();
+}
+\end{lstlisting}
 
 \textbf{Iteration.} \sym{DBImpl::NewIterator}
 (\codref{db/db\_impl.cc}{1174--1184}) works in two layers:
@@ -301,6 +381,20 @@ The first match wins. A \sym{kTypeDeletion} entry returns
           (\codref{db/db\_iter.cc}{177--207}) collapses multiple internal
           versions of one user key into a single visible entry.
 \end{itemize}
+
+\begin{lstlisting}
+// db/db_impl.cc : 1094-1102  (inside NewInternalIterator)
+std::vector<Iterator*> list;
+list.push_back(mem_->NewIterator());
+mem_->Ref();
+if (imm_ != nullptr) {
+  list.push_back(imm_->NewIterator());
+  imm_->Ref();
+}
+versions_->current()->AddIterators(options, &list);
+Iterator* internal_iter =
+    NewMergingIterator(&internal_comparator_, &list[0], list.size());
+\end{lstlisting}
 
 The youngest entry whose sequence is $\le$ snapshot is exposed; a tombstone
 hides the key. \sym{Scan} uses this same iterator, so it does not need
@@ -317,6 +411,26 @@ a background compaction when any of these is true:
     \item \sym{versions\_->NeedsCompaction()} --- a level's score is $\ge 1$
           or seek-counters triggered a compaction.
 \end{itemize}
+
+\begin{lstlisting}
+// db/db_impl.cc : 668-683
+void DBImpl::MaybeScheduleCompaction() {
+  mutex_.AssertHeld();
+  if (background_compaction_scheduled_) {
+    // Already scheduled
+  } else if (shutting_down_.load(std::memory_order_acquire)) {
+    // DB is being deleted; no more background compactions
+  } else if (!bg_error_.ok()) {
+    // Already got an error; no more changes
+  } else if (imm_ == nullptr && manual_compaction_ == nullptr &&
+             !versions_->NeedsCompaction()) {
+    // No work to be done
+  } else {
+    background_compaction_scheduled_ = true;
+    env_->Schedule(&DBImpl::BGWork, this);
+  }
+}
+\end{lstlisting}
 
 \sym{BackgroundCompaction} (\codref{db/db\_impl.cc}{708--787}) then runs:
 \begin{enumerate}[leftmargin=1.6em,itemsep=2pt]
@@ -342,6 +456,99 @@ a background compaction when any of these is true:
     \item \sym{InstallCompactionResults} records a \sym{VersionEdit} and
           calls \sym{RemoveObsoleteFiles} to reclaim disk space.
 \end{enumerate}
+
+The dispatch logic inside \fname{BackgroundCompaction}:
+
+\begin{lstlisting}
+// db/db_impl.cc : 708-763  (BackgroundCompaction, simplified)
+void DBImpl::BackgroundCompaction() {
+  mutex_.AssertHeld();
+  if (imm_ != nullptr) {
+    CompactMemTable();
+    return;
+  }
+  Compaction* c;
+  bool is_manual = (manual_compaction_ != nullptr);
+  if (is_manual) {
+    ManualCompaction* m = manual_compaction_;
+    c = versions_->CompactRange(m->level, m->begin, m->end);
+    m->done = (c == nullptr);
+  } else {
+    c = versions_->PickCompaction();
+  }
+  if (c == nullptr) {
+    // Nothing to do
+  } else if (!is_manual && c->IsTrivialMove()) {
+    // Move file to next level without rewriting data
+    FileMetaData* f = c->input(0, 0);
+    c->edit()->RemoveFile(c->level(), f->number);
+    c->edit()->AddFile(c->level() + 1, f->number,
+                       f->file_size, f->smallest, f->largest);
+    versions_->LogAndApply(c->edit(), &mutex_);
+  } else {
+    CompactionState* compact = new CompactionState(c);
+    DoCompactionWork(compact);
+    CleanupCompaction(compact);
+    RemoveObsoleteFiles();
+  }
+}
+\end{lstlisting}
+
+\fname{CompactMemTable} (\codref{db/db\_impl.cc}{549--580}) flushes
+\sym{imm\_} to L0:
+
+\begin{lstlisting}
+// db/db_impl.cc : 549-579
+void DBImpl::CompactMemTable() {
+  mutex_.AssertHeld();
+  assert(imm_ != nullptr);
+  VersionEdit edit;
+  Version* base = versions_->current();
+  base->Ref();
+  Status s = WriteLevel0Table(imm_, &edit, base);
+  base->Unref();
+  if (s.ok()) {
+    edit.SetPrevLogNumber(0);
+    edit.SetLogNumber(logfile_number_);
+    s = versions_->LogAndApply(&edit, &mutex_);
+  }
+  if (s.ok()) {
+    imm_->Unref();
+    imm_ = nullptr;
+    has_imm_.store(false, std::memory_order_release);
+    RemoveObsoleteFiles();
+  }
+}
+\end{lstlisting}
+
+The key-dropping logic inside \fname{DoCompactionWork}
+(\codref{db/db\_impl.cc}{950--984}) decides which entries survive:
+
+\begin{lstlisting}
+// db/db_impl.cc : 950-983  (inside DoCompactionWork loop)
+bool drop = false;
+if (!ParseInternalKey(key, &ikey)) {
+  current_user_key.clear();
+  has_current_user_key = false;
+  last_sequence_for_key = kMaxSequenceNumber;
+} else {
+  if (!has_current_user_key ||
+      user_comparator()->Compare(ikey.user_key,
+                                 Slice(current_user_key)) != 0) {
+    current_user_key.assign(ikey.user_key.data(), ikey.user_key.size());
+    has_current_user_key = true;
+    last_sequence_for_key = kMaxSequenceNumber;
+  }
+  if (last_sequence_for_key <= compact->smallest_snapshot) {
+    drop = true;  // (A) hidden by newer entry
+  } else if (ikey.type == kTypeDeletion &&
+             ikey.sequence <= compact->smallest_snapshot &&
+             compact->compaction->IsBaseLevelForKey(ikey.user_key)) {
+    drop = true;  // obsolete deletion marker
+  }
+  last_sequence_for_key = ikey.sequence;
+}
+\end{lstlisting}
 
 % =============================================================
 \section{Range scan: \texttt{DB::Scan}}\label{sec:scan}
@@ -405,6 +612,7 @@ Status DBImpl::Scan(const ReadOptions& options, const Slice& start_key,
 \end{itemize}
 
 % =============================================================
+\newpage
 \section{Range delete: \texttt{DB::DeleteRange}}\label{sec:dr}
 % =============================================================
 
@@ -450,6 +658,7 @@ Status DBImpl::DeleteRange(const WriteOptions& options, const Slice& start_key,
 \end{itemize}
 
 % =============================================================
+\newpage
 \section{Manual full compaction: \texttt{DB::ForceFullCompaction}}\label{sec:fc}
 % =============================================================
 
@@ -518,7 +727,11 @@ We measured the performance of our new APIs using a custom evaluation benchmark
 freshly-created database of 10{,}000 keys.  All operations target a contiguous
 1{,}000-key sub-range.
 
-\begin{table}[h!]
+\begin{designnote}[Reproducing the Benchmark]
+To test the implementation and reproduce these metrics, the benchmark source is provided in \fname{db/eval\_bench.cc}. Per the assignment instructions, we have not modified the tracked build system. To compile and run the benchmark yourself, please add \lstinline|leveldb_benchmark("db/eval_bench.cc")| after line 440 in \fname{CMakeLists.txt}, then rebuild.
+\end{designnote}
+
+\begin{table}[htbp]
 \centering
 \caption{Benchmark results for new APIs (1,000-key range, 10k-key DB).}
 \label{tab:bench}
@@ -573,8 +786,23 @@ Scan (start == end) results: 0 (expected: 0)\;\textcolor{str}{\checkmark}
 \subsection{Compaction aggregate statistics}
 
 248 invocations were recorded in \fname{compaction\_stats.txt}.
+Each line in the file contains five semicolon-separated fields, written by
+\fname{ForceFullCompaction} at \codref{db/db\_impl.cc}{1694}:
 
-\begin{table}[h!]
+\begin{enumerate}[leftmargin=1.6em,itemsep=2pt]
+    \item \textbf{\sym{num\_compactions}} --- number of compaction passes executed
+          (1 counts the initial memtable flush; each non-empty level adds one more).
+    \item \textbf{\sym{total\_input\_files}} --- total number of SSTable files across
+          all levels \emph{before} compaction began.
+    \item \textbf{\sym{total\_output\_files}} --- total number of SSTable files across
+          all levels \emph{after} compaction finished.
+    \item \textbf{\sym{bytes\_read}} --- cumulative bytes read from input SSTables
+          during this compaction (delta over baseline).
+    \item \textbf{\sym{bytes\_written}} --- cumulative bytes written to output SSTables
+          during this compaction (delta over baseline).
+\end{enumerate}
+
+\begin{table}[htbp]
 \centering
 \caption{Aggregate statistics across 248 \texttt{ForceFullCompaction} calls.}
 \label{tab:agg}
@@ -600,11 +828,11 @@ Compression ratio          & bytes\_written / bytes\_read                     & 
 
 \subsection{Distribution of \texttt{num\_compactions}}
 
-\begin{figure}[h!]
+\begin{figure}[htbp]
 \centering
 \begin{tikzpicture}
 \begin{axis}[
-    width=0.85\linewidth, height=6.2cm,
+    width=0.82\linewidth, height=5.5cm,
     ybar, bar width=18pt,
     enlarge x limits=0.10,
     ymin=0, ymax=170,
@@ -635,9 +863,9 @@ Compression ratio          & bytes\_written / bytes\_read                     & 
     \item The 0.824 compression ratio confirms that compaction effectively removed stale data (17.6\% reduction).
 \end{itemize}
 
-\subsection{Representative patterns}
+\subsection{Representative patterns and sanity checks}
 
-\begin{table}[h!]
+\begin{table}[htbp]
 \centering
 \caption{Pattern families observed in \texttt{compaction\_stats.txt}.}
 \label{tab:patterns}
@@ -655,7 +883,7 @@ Compression ratio          & bytes\_written / bytes\_read                     & 
 \end{tabularx}
 \end{table}
 
-\subsection{Sanity checks}
+\noindent\textbf{Sanity checks:}
 \begin{itemize}[leftmargin=1.4em,itemsep=2pt]
     \item \sym{num\_compactions} is in $[1, 7]$ for every line, matching the loop bound at \codref{db/db\_impl.cc}{1640}.
     \item \sym{output\_files == 0} only when \sym{input\_files == 0}.
