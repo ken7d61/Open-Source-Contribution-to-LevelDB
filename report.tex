@@ -859,7 +859,9 @@ Compression ratio          & bytes\_written / bytes\_read                     & 
 
 \begin{itemize}[leftmargin=1.4em,itemsep=2pt]
     \item $\sym{nc}=1$ (26 calls): idle calls where only the memtable flush ran.
+    \item $\sym{nc}=2,3,4$ (4, 23, 29 calls): partial sweeps where only the lower levels (L0 and a few above) held data when the call fired.
     \item $\sym{nc}=5$ (152 calls, 61.3\%): the workload kept L0--L3 populated for most of its run.
+    \item $\sym{nc}=6,7$ (12, 2 calls): deeper sweeps where data had already cascaded into L4 (and occasionally L5), so additional non-empty levels each contributed one more compaction pass.
     \item The 0.824 compression ratio confirms that compaction effectively removed stale data (17.6\% reduction).
 \end{itemize}
 
@@ -878,7 +880,7 @@ Compression ratio          & bytes\_written / bytes\_read                     & 
 \sym{1; 0; 0; 0; 0}          & DB was empty; only the flush ran.                                   & 26 \\
 \sym{1; 1; 1; 0; 0}          & One L0 file after flush; no further work.                           & several \\
 \sym{5; 2; 1; <r>; <w>}      & Flush + four levels touched; L0--L3 had data.                       & 152 \\
-\sym{4; 2; 4; 39649; 45379}  & Inversion: L1 overlap files rewritten alongside L0 input.           & --- \\
+\sym{4; 2; 4; 39649; 45379}  & Inversion: L1 overlap files rewritten alongside L0 input.           & rare \\
 \bottomrule
 \end{tabularx}
 \end{table}

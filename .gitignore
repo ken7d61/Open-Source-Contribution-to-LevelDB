@@ -13,7 +13,7 @@ include/port/
 !leveldbConfig.cmake.in
 !/cmake/
 *.md
-
+clarif.txt
 # Binaries
 .cache
 /build/
@@ -51,7 +51,6 @@ testdb/
 
 # Misc
 stats.awk
-compaction_stats.txt
 
 # Third-party dependencies (downloaded automatically)
 third_party/googletest/
