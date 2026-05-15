@@ -1689,14 +1689,30 @@ Status DBImpl::ForceFullCompaction() {
     }
   }
 
+  const long long n_compactions = static_cast<long long>(num_compactions);
+  const long long n_input = static_cast<long long>(total_input_files);
+  const long long n_output = static_cast<long long>(total_output_files);
+  const long long bytes_r =
+      static_cast<long long>(final_bytes_read - baseline_bytes_read);
+  const long long bytes_w =
+      static_cast<long long>(final_bytes_written - baseline_bytes_written);
+
+  std::printf(
+      "===== ForceFullCompaction Stats =====\n"
+      "  Number of compactions executed : %lld\n"
+      "  Number of input files          : %lld\n"
+      "  Number of output files         : %lld\n"
+      "  Total bytes read               : %lld\n"
+      "  Total bytes written            : %lld\n"
+      "=====================================\n",
+      n_compactions, n_input, n_output, bytes_r, bytes_w);
+
   FILE* f = std::fopen("compaction_stats.txt", "a");
   if (f != nullptr) {
-    std::fprintf(f, "%lld; %lld; %lld; %lld; %lld\n",
-                 static_cast<long long>(num_compactions),
-                 static_cast<long long>(total_input_files),
-                 static_cast<long long>(total_output_files),
-                 static_cast<long long>(final_bytes_read - baseline_bytes_read),
-                 static_cast<long long>(final_bytes_written - baseline_bytes_written));
+    std::fprintf(f,
+                 "Compactions=%lld InputFiles=%lld OutputFiles=%lld "
+                 "BytesRead=%lld BytesWritten=%lld\n",
+                 n_compactions, n_input, n_output, bytes_r, bytes_w);
     std::fclose(f);
   }
 
